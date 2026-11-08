@@ -1,118 +1,70 @@
-# offline-outbox-js
+# offline-outbox-js — Durable Offline Outbox for Field Apps
 
-> Durable offline outbox for field apps: techs keep working with zero signal — every tap is a persisted mutation that syncs with backoff + conflict resolution when the network returns.
+> Techs keep working with zero signal — every tap is a persisted mutation that syncs with backoff + conflict resolution when the network returns.
 
-Framework-free TypeScript. Zero runtime dependencies. Works in browsers, workers, and Node.
+![TypeScript](https://img.shields.io/badge/TypeScript-5-blue) ![Zero deps](https://img.shields.io/badge/runtime_deps-0-brightgreen) ![Tests](https://img.shields.io/badge/tests-36_Vitest-brightgreen) ![License](https://img.shields.io/badge/license-MIT-green)
 
-## The 60-second pitch
+Framework-free TypeScript. Zero runtime dependencies. Browsers, workers, and Node.
 
-**Problem.** Field techs lose signal in basements, rural sites, dead zones. Without an offline story, their checklist taps either vanish or require a "don't close the app!" prayer.
+**🎬 Live demo:** `npm run demo` → http://localhost:8040/demo/ (field-tech checklist, no bundler) · **📸 Screenshot:** `screenshots/demo-1440.png`
 
-**What.** A durable outbox: `enqueue()` every mutation instantly (persisted to `localStorage`), then `flush()` pushes them in order with exponential backoff + jitter, per-mutation status, events, and three conflict strategies.
+## The problem it solves
+
+Field techs lose signal in basements, rural sites, dead zones. Without an offline story, checklist taps vanish or demand a "don't close the app!" prayer. This lib is the fix: `enqueue()` every mutation instantly (persisted to `localStorage`), then `flush()` pushes them in FIFO order with exponential backoff + jitter, per-mutation status, events, and three conflict strategies.
 
 ```ts
 import { Outbox, LocalStorageAdapter, FetchTransport } from 'offline-outbox-js';
 
 const outbox = new Outbox({
-  storage: new LocalStorageAdapter(),          // durable across reloads
-  transport: new FetchTransport('/api/sync'),  // your CRM endpoint
+  storage: new LocalStorageAdapter(),
+  transport: new FetchTransport('/api/sync'),
 });
 
 outbox.enqueue('complete-step', 'job-step', { stepId: 's3', done: true }, 'tech-7');
 await outbox.flush(); // retries with backoff, resolves conflicts
 ```
 
-## Try it (2 commands)
+## Quickstart
 
 ```bash
 npm ci && npm run build
-npm run demo          # serves on http://localhost:8040
+npm run demo          # http://localhost:8040/demo/
 ```
 
-Open **http://localhost:8040/demo/** — a field-tech job checklist:
-
-1. Toggle checklist steps while offline (DevTools → Network → offline, or the in-page switch) — the queue badge counts pending mutations.
-2. Hit **Sync now** — queued steps flush with simulated latency.
-3. Reload mid-queue — the queue survives (localStorage adapter).
-4. Arm **Conflict on next sync** — see `keep-both` park a mutation for manual review (retry / drop).
-
-(Use the local server, not `file://` — ES modules need `http`.)
+In the demo: toggle steps while offline (DevTools → offline, or the in-page switch) → hit **Sync now** → reload mid-queue (it survives) → arm **Conflict on next sync** to see `keep-both` park a mutation for review. (Serve over `http`, not `file://` — ES modules need it.)
 
 ## How it works
 
 ```
-enqueue() → persist → flush() → transport.send() ─┬─ ack      → status acked
+enqueue() → persist → flush() → transport.send() ─┬─ ack      → acked
                                                   ├─ conflict → strategy decides
-                                                  └─ throw    → backoff + retry (up to maxAttempts → failed)
+                                                  └─ throw    → backoff + retry (→ failed after maxAttempts)
 ```
 
-- **FIFO order**, crash recovery (`sending` → `pending` on reload), one poisoned mutation never blocks the rest.
-- **Concurrent-safe**: a second `flush()` while one is running is a no-op; acked/failed/conflict entries are never resent.
+- FIFO order, crash recovery (`sending` → `pending` on reload), one poisoned mutation never blocks the rest.
+- Concurrent-safe: a second `flush()` mid-flight is a no-op; terminal entries are never resent.
 
 ## API
 
-| Method | Signature | What it does |
-|---|---|---|
-| `enqueue` | `(op, entity, payload, actor?) → StoredMutation` | Persist + queue a mutation, emits `enqueued` |
-| `flush` | `() → Promise<FlushSummary>` | Push pending in FIFO order with retries, emits `drained` when nothing is pending |
-| `getQueue` / `getPending` / `getPendingCount` | `() → …` | Inspect the queue (copies, safe to render) |
-| `getById` | `(id) → StoredMutation?` | Per-mutation status + attempts + error + resolution |
-| `resolveConflict` | `(id, 'retry' \| 'drop') → boolean` | Manual review for `keep-both` conflicts |
-| `delayFor` | `(attempt) → ms` | Backoff schedule (pure, testable) |
-| `prune` | `() → number` | Drop terminal `acked`/`failed` entries |
-| `clear` | `() → void` | Empty the queue |
-| `on` | `(event, fn) → unsubscribe` | Subscribe to events |
-
-**Mutation shape:** `{ id, op, entity, payload, ts, actor }` + status fields (`status, attempts, nextRetryAt, error?, resolution?`).
+| Method | What it does |
+|---|---|
+| `enqueue(op, entity, payload, actor?)` | Persist + queue a mutation, emits `enqueued` |
+| `flush()` | Push pending FIFO with retries, emits `drained` when empty |
+| `getQueue` / `getPending` / `getPendingCount` | Inspect (copies, safe to render) |
+| `getById(id)` | Status + attempts + error + resolution |
+| `resolveConflict(id, 'retry' \| 'drop')` | Manual review for `keep-both` |
+| `delayFor(attempt)` | Pure backoff schedule (testable) |
+| `prune()` / `clear()` | Drop terminal entries / empty queue |
+| `on(event, fn)` | Subscribe (`enqueued, acked, failed, conflict, drained`) |
 
 **Statuses:** `pending → sending → acked | failed | conflict`.
 
-### Events
+**Storage:** `LocalStorageAdapter` (durable, browsers) · `MemoryStorage` (Node/tests).
+**Transports:** `FetchTransport` (production, 409 → conflict) · `FakeTransport` (tests/demo).
 
-| Event | Payload | When |
-|---|---|---|
-| `enqueued` | mutation | a mutation is queued |
-| `acked` | mutation | server acked it (or a strategy resolved it) |
-| `failed` | mutation | retries exhausted (`mutation.error` kept) |
-| `conflict` | mutation | parked for manual review (`keep-both`) |
-| `drained` | `null` | flush finished with zero pending |
+**Conflict strategies:** `last-write-wins` (default) · `server-wins` · `keep-both` (parks for human review).
 
-### Storage adapters
-
-| Adapter | Durable? | Default where? |
-|---|---|---|
-| `LocalStorageAdapter(key?)` | yes (survives reload/crash) | browsers |
-| `MemoryStorage` | no | Node / tests |
-
-### Transports (injectable)
-
-| Transport | Use |
-|---|---|
-| `FetchTransport(url, { fetchFn?, conflictStatuses? })` | production: POSTs JSON, maps 409 → conflict, non-2xx → retryable throw |
-| `FakeTransport({ latencyMs?, failFirst?, alwaysFail?, failIds?, conflictIds? })` | tests + demo, zero network |
-
-## Conflict matrix
-
-| Strategy | On conflict | Final status | Needs a human? |
-|---|---|---|---|
-| `last-write-wins` (default) | newer timestamp wins (no server ts → local wins) | `acked` (`local-newer` / `server-newer`) | no |
-| `server-wins` | local edit discarded | `acked` (`server-wins`) | no |
-| `keep-both` | parked for review | `conflict` (`manual-review`) | yes — `resolveConflict(id, 'retry' \| 'drop')` |
-
-## Backoff
-
-`delay(attempt) = min(maxMs, baseMs · 2^attempt) ± jitter` — defaults `base 500ms / max 30s / 5 attempts / ±20%`, all configurable. `delayFor()` is pure (inject `random` for deterministic tests); `sleep` and `now` are injectable for fake-timer testing.
-
-## Scripts
-
-```bash
-npm ci            # install (devDeps only: typescript + vitest)
-npm test          # 36 tests, Vitest
-npm run build     # tsc → dist/ (ESM + .d.ts, zero-dep)
-npm run demo      # http://localhost:8040/demo/
-```
-
-## Project layout
+## Repo map
 
 ```
 src/outbox.ts       Outbox, MemoryStorage, LocalStorageAdapter, backoff, events
@@ -120,21 +72,23 @@ src/transports.ts   Transport, FetchTransport, FakeTransport
 src/conflicts.ts    last-write-wins / server-wins / keep-both
 src/index.ts        public barrel
 tests/              outbox.test.ts (29) + transports.test.ts (7)
-demo/index.html     single-file field-tech checklist (imports ../dist, no bundler)
+demo/index.html     single-file checklist (imports ../dist, no bundler)
 ```
 
-## Screenshots
+## Tests
 
-`screenshots/demo-1440.png` — the field-tech checklist + outbox drawer, captured live (`npm run demo`, port 8040).
+```bash
+npm test            # 36 tests, Vitest
+npm run build       # tsc → dist/ (ESM + .d.ts, zero-dep)
+```
 
 ## Honest limits
 
-- **No IndexedDB adapter yet** — `localStorage` caps around 5MB; large photo payloads need IDB (interface is ready, PR-shaped hole).
-- **No E2E encryption** — queued payloads sit in plaintext; fine for checklists, not for PII-heavy fields.
-- **Capacitor/native shell untested** — web-only so far; the lib is runtime-agnostic but no device testing has been done.
-- **LWW needs server timestamps to be exactly right** — clock skew can flip a close call; `keep-both` exists for the cases that matter.
-- **No mutation compaction/dedup** — ten toggles of one checkbox sync as ten mutations; call `prune()` to shed terminal entries.
+- No IndexedDB adapter yet — `localStorage` ~5MB cap (interface ready).
+- No E2E encryption — queued payloads are plaintext.
+- LWW needs server timestamps to be exactly right; `keep-both` covers what matters.
+- No mutation compaction — ten toggles sync as ten mutations.
 
 ## License
 
-MIT
+MIT — see [LICENSE](./LICENSE).
