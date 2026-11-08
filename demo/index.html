@@ -1,0 +1,287 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Offline Outbox — field-tech demo</title>
+<style>
+  :root { --bg:#f4f5f7; --card:#fff; --ink:#1c2330; --mut:#67728a; --line:#e3e7ee;
+          --ok:#178a4c; --warn:#b25e09; --bad:#c22e3a; --info:#2b6cb0; --btn:#1c2330; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink);
+         font:15px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif; }
+  main { max-width:720px; margin:0 auto; padding:20px 16px 48px; }
+  header { display:flex; justify-content:space-between; align-items:flex-start; gap:12px; margin-bottom:12px; }
+  h1 { font-size:20px; margin:0; }
+  .sub { margin:2px 0 0; color:var(--mut); font-size:13px; }
+  .badges { display:flex; gap:8px; flex-shrink:0; }
+  .pill { display:inline-block; padding:4px 12px; border-radius:999px; font-size:13px;
+          background:#e8ebf0; color:var(--mut); white-space:nowrap; }
+  .pill b { font-variant-numeric:tabular-nums; }
+  .pill.on { background:#dcf3e5; color:var(--ok); }
+  .pill.off { background:#fbe3e6; color:var(--bad); }
+  .pill.warn { background:#fdf0dc; color:var(--warn); }
+  .banner { background:#1c2330; color:#ffd97a; border-radius:10px; padding:10px 14px;
+            font-size:13px; margin-bottom:14px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:12px;
+          padding:14px 16px; margin-bottom:14px; }
+  .card h2 { font-size:14px; text-transform:uppercase; letter-spacing:.06em;
+             color:var(--mut); margin:0 0 10px; }
+  ul, ol { margin:0; padding:0; list-style:none; }
+  #steps li { display:flex; gap:10px; align-items:center; padding:9px 4px;
+              border-bottom:1px solid var(--line); }
+  #steps li:last-child { border-bottom:none; }
+  #steps input { width:18px; height:18px; accent-color:var(--ok); }
+  .hint { color:var(--mut); font-size:13px; margin:10px 0 0; }
+  .row { display:flex; gap:8px; flex-wrap:wrap; margin-bottom:10px; }
+  button { background:var(--btn); color:#fff; border:none; border-radius:8px;
+           padding:9px 14px; font-size:14px; cursor:pointer; }
+  button:disabled { opacity:.5; cursor:wait; }
+  button.ghost { background:#eef1f6; color:var(--ink); }
+  button.ghost[aria-pressed="true"] { background:#fbe3e6; color:var(--bad); }
+  button.danger { color:var(--bad); }
+  button.mini { padding:3px 10px; font-size:12px; border-radius:6px; }
+  #queue li { display:flex; gap:8px; align-items:center; padding:7px 4px;
+              border-bottom:1px solid var(--line); font-size:13px; flex-wrap:wrap; }
+  #queue li:last-child { border-bottom:none; }
+  #queue .empty, #log .empty { color:var(--mut); border:none; }
+  code.id { font-family:ui-monospace,Menlo,monospace; font-size:12px; color:var(--mut); }
+  .st { font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:.04em;
+        padding:2px 8px; border-radius:99px; }
+  .st.pending { background:#e8ebf0; color:var(--mut); }
+  .st.sending { background:#dbeafe; color:var(--info); }
+  .st.acked { background:#dcf3e5; color:var(--ok); }
+  .st.failed { background:#fbe3e6; color:var(--bad); }
+  .st.conflict { background:#fdf0dc; color:var(--warn); }
+  .qbtns { margin-left:auto; display:flex; gap:6px; }
+  #log { max-height:180px; overflow:auto; font-family:ui-monospace,Menlo,monospace;
+         font-size:12px; }
+  #log li { padding:3px 0; border-bottom:1px dotted var(--line); }
+  #log time { color:var(--mut); margin-right:8px; }
+  footer { color:var(--mut); font-size:12px; text-align:center; margin-top:6px; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <div>
+      <h1>Job #1042 — Boiler maintenance</h1>
+      <p class="sub">Field checklist · tech-7 · durable offline outbox</p>
+    </div>
+    <div class="badges">
+      <span id="conn" class="pill">…</span>
+      <span class="pill warn">queued <b id="pendingCount">0</b></span>
+    </div>
+  </header>
+
+  <div class="banner">Demo transport — in production this flushes to the CRM API.</div>
+
+  <section class="card">
+    <h2>Checklist</h2>
+    <ul id="steps"></ul>
+    <p class="hint">Toggle steps while offline (DevTools → offline, or the switch below) — every tap enqueues a mutation. Reload the page: the queue survives.</p>
+  </section>
+
+  <section class="card">
+    <h2>Outbox</h2>
+    <div class="row">
+      <button id="syncBtn">Sync now</button>
+      <button id="offlineBtn" class="ghost" aria-pressed="false">Go offline (simulated)</button>
+      <button id="conflictBtn" class="ghost">Conflict on next sync</button>
+      <button id="resetBtn" class="ghost danger">Reset demo</button>
+    </div>
+    <ul id="queue"></ul>
+  </section>
+
+  <section class="card">
+    <h2>Event log</h2>
+    <ol id="log"></ol>
+  </section>
+
+  <footer>localStorage adapter · keep-both conflicts need your call (retry / drop) · zero network in this demo</footer>
+</main>
+
+<script type="module">
+import { Outbox, LocalStorageAdapter, FakeTransport } from '../dist/index.js';
+
+const STEPS_KEY = 'demo:steps:v1';
+const STEPS = [
+  { id: 's1', label: 'Shut off gas + power' },
+  { id: 's2', label: 'Inspect heat exchanger' },
+  { id: 's3', label: 'Clean burner assembly' },
+  { id: 's4', label: 'Check pressure relief valve' },
+  { id: 's5', label: 'Restart + verify ignition' },
+  { id: 's6', label: 'Photo + customer signature' },
+];
+
+// ---- offline simulation: manual switch OR real browser offline (DevTools counts) ----
+let forceOffline = false;
+let conflictNext = false;
+const online = () => navigator.onLine && !forceOffline;
+
+// ---- demo transport: fake latency, respects offline, can inject one conflict ----
+const fake = new FakeTransport({ latencyMs: 450 });
+const demoTransport = {
+  async send(m) {
+    if (!online()) throw new Error('offline — queued, will retry on next sync');
+    if (conflictNext) {
+      conflictNext = false;
+      updateConflictBtn();
+      return { status: 'conflict', serverTs: Date.now(), serverVersion: { note: 'dispatcher edited this job' } };
+    }
+    return fake.send(m);
+  },
+};
+
+const outbox = new Outbox({
+  storage: new LocalStorageAdapter('demo:outbox:v1'),
+  transport: demoTransport,
+  conflictStrategy: 'keep-both', // showcase manual review in the demo
+  backoff: { baseMs: 400, maxMs: 5000, maxAttempts: 3, jitterRatio: 0.2 },
+});
+
+// ---- checklist state (optimistic UI; truth for sync lives in the outbox) ----
+let done = {};
+try { done = JSON.parse(localStorage.getItem(STEPS_KEY) || '{}'); } catch { done = {}; }
+const saveDone = () => localStorage.setItem(STEPS_KEY, JSON.stringify(done));
+
+// ---- dom ----
+const $ = (id) => document.getElementById(id);
+const stepsEl = $('steps'), queueEl = $('queue'), logEl = $('log');
+const connEl = $('conn'), pendingEl = $('pendingCount'), syncBtn = $('syncBtn');
+const offlineBtn = $('offlineBtn'), conflictBtn = $('conflictBtn'), resetBtn = $('resetBtn');
+
+function log(evt, detail = '') {
+  const li = document.createElement('li');
+  const t = document.createElement('time');
+  t.textContent = new Date().toLocaleTimeString();
+  li.append(t, document.createTextNode(`${evt}${detail ? ' — ' + detail : ''}`));
+  logEl.prepend(li);
+  while (logEl.children.length > 40) logEl.lastChild.remove();
+}
+
+function renderConn() {
+  const on = online();
+  connEl.textContent = on ? '● online' : '● offline';
+  connEl.className = 'pill ' + (on ? 'on' : 'off');
+}
+
+function renderSteps() {
+  stepsEl.innerHTML = '';
+  for (const s of STEPS) {
+    const li = document.createElement('li');
+    const cb = document.createElement('input');
+    cb.type = 'checkbox';
+    cb.checked = !!done[s.id];
+    cb.id = 'step-' + s.id;
+    cb.addEventListener('change', () => {
+      done[s.id] = cb.checked;
+      saveDone();
+      outbox.enqueue('toggle-step', 'job-step', { stepId: s.id, done: cb.checked }, 'tech-7');
+      renderAll();
+    });
+    const label = document.createElement('label');
+    label.htmlFor = cb.id;
+    label.textContent = s.label;
+    li.append(cb, label);
+    stepsEl.append(li);
+  }
+}
+
+function renderQueue() {
+  const q = outbox.getQueue();
+  pendingEl.textContent = String(outbox.getPendingCount());
+  queueEl.innerHTML = '';
+  if (q.length === 0) {
+    const li = document.createElement('li');
+    li.className = 'empty';
+    li.textContent = 'Queue empty — toggle a step to enqueue your first mutation.';
+    queueEl.append(li);
+    return;
+  }
+  for (const m of [...q].reverse()) {
+    const li = document.createElement('li');
+    const pill = document.createElement('span');
+    pill.className = 'st ' + m.status;
+    pill.textContent = m.status;
+    const id = document.createElement('code');
+    id.className = 'id';
+    id.textContent = m.id.slice(0, 8);
+    const what = document.createElement('span');
+    const p = m.payload && typeof m.payload === 'object' ? m.payload : {};
+    what.textContent = `${m.op} ${p.stepId ?? ''} ${p.done ? '✓' : '○'} · try ${m.attempts}${m.resolution ? ' · ' + m.resolution : ''}${m.error ? ' · ' + m.error : ''}`;
+    li.append(pill, id, what);
+    if (m.status === 'conflict') {
+      const btns = document.createElement('span');
+      btns.className = 'qbtns';
+      const retry = document.createElement('button');
+      retry.className = 'mini';
+      retry.textContent = 'retry (mine wins next flush)';
+      retry.addEventListener('click', () => { outbox.resolveConflict(m.id, 'retry'); renderAll(); });
+      const drop = document.createElement('button');
+      drop.className = 'mini ghost';
+      drop.textContent = 'drop (accept server)';
+      drop.addEventListener('click', () => { outbox.resolveConflict(m.id, 'drop'); renderAll(); });
+      btns.append(retry, drop);
+      li.append(btns);
+    }
+    queueEl.append(li);
+  }
+}
+
+function renderAll() { renderConn(); renderQueue(); }
+function updateConflictBtn() { conflictBtn.textContent = conflictNext ? 'Conflict armed ✓' : 'Conflict on next sync'; }
+
+// ---- events ----
+for (const evt of ['enqueued', 'acked', 'failed', 'conflict', 'drained']) {
+  outbox.on(evt, (m) => {
+    log(evt, m ? `${m.id.slice(0, 8)} ${m.op}${m.resolution ? ' (' + m.resolution + ')' : ''}` : 'queue empty');
+    renderAll();
+  });
+}
+window.addEventListener('online', () => { renderConn(); log('browser online', 'auto-syncing…'); void doSync(); });
+window.addEventListener('offline', () => { renderConn(); log('browser offline', 'mutations will queue'); });
+
+async function doSync() {
+  if (syncBtn.disabled) return;
+  syncBtn.disabled = true;
+  try {
+    const s = await outbox.flush();
+    log('flush summary', `processed ${s.processed} · acked ${s.acked} · failed ${s.failed} · conflicts ${s.conflicts}`);
+  } finally {
+    syncBtn.disabled = false;
+    renderAll();
+  }
+}
+
+syncBtn.addEventListener('click', () => void doSync());
+offlineBtn.addEventListener('click', () => {
+  forceOffline = !forceOffline;
+  offlineBtn.setAttribute('aria-pressed', String(forceOffline));
+  offlineBtn.textContent = forceOffline ? 'Back online (simulated)' : 'Go offline (simulated)';
+  renderConn();
+  log(forceOffline ? 'simulated offline' : 'simulated online');
+  if (!forceOffline) void doSync();
+});
+conflictBtn.addEventListener('click', () => {
+  conflictNext = !conflictNext;
+  updateConflictBtn();
+  if (conflictNext) log('conflict armed', 'next send returns 409-style conflict');
+});
+resetBtn.addEventListener('click', () => {
+  outbox.clear();
+  localStorage.removeItem(STEPS_KEY);
+  done = {};
+  logEl.innerHTML = '';
+  renderSteps();
+  renderAll();
+  log('demo reset', 'queue + checklist cleared');
+});
+
+// ---- init ----
+renderSteps();
+renderAll();
+log('demo ready', `${outbox.getPendingCount()} pending from previous session`);
+</script>
+</body>
+</html>
