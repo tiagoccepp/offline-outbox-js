@@ -1,0 +1,27 @@
+{
+  "name": "offline-outbox-js",
+  "version": "0.1.0",
+  "description": "Durable offline outbox for field apps: enqueue mutations offline, sync with backoff + conflict strategies when signal returns.",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": ["dist", "README.md", "demo"],
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "demo": "python3 -m http.server 8040 --directory ."
+  },
+  "keywords": ["offline", "outbox", "sync", "retry", "conflict-resolution", "field-service"],
+  "license": "MIT",
+  "devDependencies": {
+    "typescript": "5.9.3",
+    "vitest": "5.1.0"
+  }
+}
